@@ -15,6 +15,8 @@ BAUD = 230400
 HTTP_PORT = 8080
 SIZE = 800
 RANGE_M = 4.0
+OBSTRUCTION_DEPTH_M = 1.0
+OBSTRUCTION_WIDTH_M = 0.78
 
 state = {"scans": deque(maxlen=3), "lock": threading.Lock()}
 
@@ -56,13 +58,19 @@ def make_image():
         r=m*scale; draw.ellipse((c-r,c-r,c+r,c+r), outline='#2e4352')
         draw.text((c+5,c-r+4), f'{m} m', fill='#87a1b1')
     draw.line((c-15,c,c+15,c), fill='white', width=2); draw.line((c,c-15,c,c+15), fill='white', width=2)
+    half_zone = (OBSTRUCTION_WIDTH_M / 2) * scale
+    zone_top = c - OBSTRUCTION_DEPTH_M * scale
+    draw.rectangle((c-half_zone, zone_top, c+half_zone, c), outline='#ff4b4b', width=3)
+    draw.text((c+half_zone+6, zone_top+4), 'obstruction zone', fill='#ff7676')
     draw.text((15,15), 'Sassy / WitMotion D6 live lidar', fill='white')
     draw.text((15,40), 'Top = lidar-forward reference; centre = sensor', fill='#b6cbd8')
     # Mirror left/right while preserving north/south orientation.
     xy=[(c-d*scale*math.cos(a),c-d*scale*math.sin(a),d) for a,d in points]
     for a,b in zip(xy,xy[1:]):
         if abs(a[2]-b[2]) < .12: draw.line((a[0],a[1],b[0],b[1]),fill='#48d7bd',width=3)
-    for x,y,_ in xy: draw.ellipse((x-3,y-3,x+3,y+3),fill='#f4c95d')
+    for x,y,_ in xy:
+        blocked = c-half_zone <= x <= c+half_zone and zone_top <= y <= c
+        draw.ellipse((x-3,y-3,x+3,y+3), fill='#ff4b4b' if blocked else '#f4c95d')
     out=io.BytesIO(); image.save(out,format='JPEG',quality=88); return out.getvalue()
 
 
