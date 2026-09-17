@@ -8,9 +8,10 @@ import serial
 
 LIDAR = '/dev/ttyTHS1'; UNO = '/dev/leia-uno'
 LIDAR_BAUD = 230400; UNO_BAUD = 115200
-TRIAL_S = 10.0; UNO_ARM_S = 1.5; INITIAL_CRAWL_S = 0.5
-SPEED = 128; FRONT_DEG = 90.0; HIT_M = 1.0; ZONE_WIDTH_M = 0.78
-MIN_CLUSTER_POINTS = 3; MIN_TURN_S = 0.8; COMMAND_PERIOD_S = 0.08
+TRIAL_S = 20.0; UNO_ARM_S = 1.5; INITIAL_CRAWL_S = 0.5
+SPEED = 164; FRONT_DEG = 180.0; HIT_M = 1.0; ZONE_WIDTH_M = 0.78
+FRONT_CENTER_DEADBAND_DEG = 10.0
+MIN_CLUSTER_POINTS = 3; EXTRA_TURN_S = 0.5; COMMAND_PERIOD_S = 0.08
 
 def angle_error(a, reference): return (a-reference+180.0) % 360.0 - 180.0
 
@@ -26,14 +27,17 @@ def clusters(scan):
 
 def in_obstruction_zone(angle, distance):
     """Match the 1m x 78cm red box shown by the live lidar website."""
-    radians = angle * 3.141592653589793 / 180.0
-    forward = distance * __import__('math').sin(radians)
-    lateral = -distance * __import__('math').cos(radians)
+    radians = angle_error(angle, FRONT_DEG) * 3.141592653589793 / 180.0
+    forward = distance * __import__('math').cos(radians)
+    lateral = distance * __import__('math').sin(radians)
     return 0.0 <= forward <= HIT_M and abs(lateral) <= ZONE_WIDTH_M / 2
 
 def front_cluster(scan):
     candidates=[c for c in clusters(scan) if in_obstruction_zone(c[0], c[1])]
-    return min(candidates,key=lambda c:c[1]) if candidates else None
+    # A wall can have an edge closer to the lidar than its face.  Prefer the
+    # cluster most nearly straight ahead so that side-edge returns cannot
+    # decide the turn direction for an obstacle in front of the robot.
+    return min(candidates, key=lambda c: (abs(angle_error(c[0], FRONT_DEG)), c[1])) if candidates else None
 
 def tracked_at_side(scan, initial, turn_left):
     # A left turn moves the stationary obstacle to robot-right; right is inverse.
@@ -79,8 +83,8 @@ def main():
                 time.sleep(.05)
             if not reader.scan():
                 raise RuntimeError('No complete lidar scan received within 5 seconds')
-            print('lidar scan ready; starting 10-second trial clock')
-            started=time.monotonic(); phase='crawl'; obstacle=None; turning_started=None; turn_left=None
+            print(f'lidar scan ready; starting {TRIAL_S:.0f}-second trial clock')
+            started=time.monotonic(); phase='crawl'; turn_right=None; clear_started=None
             while time.monotonic()-started<TRIAL_S:
                 now=time.monotonic(); elapsed=now-started; scan=reader.scan()
                 if phase=='crawl':
@@ -90,18 +94,25 @@ def main():
                     command=f'D,{SPEED},{SPEED}'; candidate=front_cluster(scan)
                     if candidate:
                         obstacle=candidate; phase='turn'; turning_started=now
-                        # A cluster on robot-right (bearing < forward) needs a left turn, and vice versa.
-                        turn_left = angle_error(candidate[0], FRONT_DEG) <= 0
-                        command=f'D,0,{SPEED}' if turn_left else f'D,{SPEED},0'
-                        print(f'front cluster at {candidate[0]:.1f}°, {candidate[1]:.2f}m; turning {"left" if turn_left else "right"}')
+                        # D,left_wheel,right_wheel.  Front/center and left-side
+                        # obstacles turn right; a right-side obstacle turns left.
+                        offset = angle_error(candidate[0], FRONT_DEG)
+                        turn_right = offset <= FRONT_CENTER_DEADBAND_DEG
+                        command=f'D,{SPEED},0' if turn_right else f'D,0,{SPEED}'
+                        side = 'center/front' if abs(offset) <= FRONT_CENTER_DEADBAND_DEG else ('left' if offset < 0 else 'right')
+                        direction = 'right' if turn_right else 'left'
+                        print(f'front cluster at {candidate[0]:.1f}°, {candidate[1]:.2f}m on {side}; turning {direction}')
                 else:
-                    if not front_cluster(scan):
+                    if clear_started is None and not front_cluster(scan):
+                        clear_started=now
+                        print(f'obstruction zone clear; continuing turn for {EXTRA_TURN_S:.1f}s')
+                    if clear_started is not None and now-clear_started >= EXTRA_TURN_S:
                         phase='approach'; command=f'D,{SPEED},{SPEED}'
-                        print('obstruction zone clear; resuming forward crawl')
+                        print('extra turn complete; resuming forward crawl')
                     else:
-                        command=f'D,0,{SPEED}' if turn_left else f'D,{SPEED},0'
+                        command=f'D,{SPEED},0' if turn_right else f'D,0,{SPEED}'
                 uno.write((command+'\n').encode()); uno.flush(); time.sleep(COMMAND_PERIOD_S)
-            else: print('10-second limit reached; stopped')
+            else: print(f'{TRIAL_S:.0f}-second limit reached; stopped')
         finally:
             uno.write(b'S\n'); uno.flush(); reader.stop.set(); reader.join(timeout=.5); print('trial complete; stop sent')
 
