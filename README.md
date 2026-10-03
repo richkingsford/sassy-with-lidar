@@ -12,7 +12,30 @@ an Arduino Uno motor controller.
 - Audio input and microphone: working (reported 2026-09-08)
 - Uno motor sketch: uploaded and captured in `firmware/sassy_drive.ino`
 - Serial bridge: scaffolded for `C`, `D`, `S`, and `H` frames
-- Lidar mapping, localization, and voice command execution: next milestones
+- D6 LiDAR and OAK-D Lite live dashboard: working on the Orin Nano
+- Supervised 5-second obstacle-avoidance trial: turns away from a measured wall,
+  then resumes forward travel when the forward arc clears
+- House mapping, localization, and voice navigation: next milestones
+
+## Live sensors and motor trials
+
+On the Orin Nano, start `python3 tools/lidar_live_web.py` and open port 8080.
+The dashboard displays LiDAR, OAK RGB, and stereo depth. Its guarded trial
+button currently runs for 5 seconds. LiDAR bearing and range choose the turn;
+OAK depth is displayed and logged as supporting information.
+
+The current hardware uses `/dev/ttyTHS1` for the D6 LiDAR and `/dev/leia-uno`
+for the Uno. The tested full-power motor commands are `D,255,0` for a right
+pivot, `D,0,255` for a left pivot, and `D,255,255` for forward travel. The Uno
+watchdog stops the motors after 250 ms without another command. The controller
+refreshes commands about every 80 ms and sends `S` when the trial ends.
+
+For a standalone motor check, run `python3 tests/motor_wiggle_test.py --run`.
+For the four one-wheel turns, run `python3 tests/motor_turn_test.py` in a clear
+area. Save one four-pane sensor image with
+`python3 tools/capture_navigation_snapshot.py` while the dashboard is running.
+Generated videos, images, and device crash dumps stay local under `artifacts/`
+and `.cache/`.
 
 ## Architecture
 

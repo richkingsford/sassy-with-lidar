@@ -6,3 +6,5 @@ log/
 __pycache__/
 *.pyc
 .venv/
+.cache/
+artifacts/
