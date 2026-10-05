@@ -2,13 +2,15 @@
 """Record one spoken command, transcribe it locally, and optionally execute it."""
 import argparse
 import json
+from datetime import datetime
 from pathlib import Path
-from urllib import request
+from urllib import error, request
 
 from record_and_transcribe import (
     DEFAULT_WHISPER_CLI, DEFAULT_WHISPER_MODEL, record, transcribe_whisper,
 )
 from voice_commands import parse_voice_command
+from sassy_speech import choose_response, speak
 
 
 def main():
@@ -19,14 +21,18 @@ def main():
     args = parser.parse_args()
     if args.seconds <= 0:
         raise ValueError("--seconds must be positive")
-    output = Path("artifacts") / "voice_command.wav"
+    output = Path("artifacts") / f"voice_command_{datetime.now():%Y%m%d_%H%M%S}.wav"
     record(output, args.seconds, "hw:0,0")
     transcript = transcribe_whisper(output, DEFAULT_WHISPER_CLI, DEFAULT_WHISPER_MODEL)
-    print(f"TRANSCRIPT: {transcript or '[no speech recognized]'}")
+    transcript_path = output.with_suffix(".heard.txt")
+    transcript_path.write_text(transcript + "\n", encoding="utf-8")
+    print(f"FULL TRANSCRIPT: {transcript or '[no speech recognized]'}")
+    print(f"Saved full transcript: {transcript_path}")
     try:
         plan = parse_voice_command(transcript)
     except ValueError as exc:
         print(f"NO ACTION: {exc}")
+        print(f"SASSY: {speak(choose_response('unknown'))}")
         return
     print("PLAN:")
     for step in plan:
@@ -35,8 +41,14 @@ def main():
         print("Preview only. Re-run with --execute after checking the plan.")
         return
     payload = json.dumps({"transcript": transcript}).encode()
-    response = request.urlopen(request.Request(args.url, data=payload, headers={"Content-Type": "application/json"}), timeout=5)
-    print(response.read().decode())
+    try:
+        response = request.urlopen(request.Request(args.url, data=payload, headers={"Content-Type": "application/json"}), timeout=5)
+        print(response.read().decode())
+    except error.HTTPError as exc:
+        print(f"NO ACTION: controller rejected command ({exc.read().decode()})")
+        print(f"SASSY: {speak(choose_response('nack'))}")
+        return
+    print(f"SASSY: {speak(choose_response('ack'))}")
 
 
 if __name__ == "__main__":

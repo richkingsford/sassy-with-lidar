@@ -11,6 +11,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 import serial
 from voice_commands import parse_voice_command
+from sassy_speech import choose_response, speak
 
 LIDAR_PORT = "/dev/ttyTHS1"; LIDAR_BAUD = 230400; UNO_PORT = "/dev/leia-uno"; UNO_BAUD = 115200; HTTP_PORT = 8080
 SIZE = 800; RANGE_M = 4.0; LIDAR_FORWARD_DEG = 90.0
@@ -158,6 +159,7 @@ def run_voice_command(transcript, steps):
                         uno.write(retreat); uno.flush(); time.sleep(.08)
                     uno.write(b"S\n"); uno.flush()
                     with state["lock"]: state["trial"] = "voice command aborted: red-zone retreat complete"
+                    speak(choose_response("nack"))
                     return
                 uno.write((command + "\n").encode()); uno.flush()
                 with state["lock"]: state["trial"] = f"VOICE: {step['label']} [{command}]"
@@ -168,6 +170,7 @@ def run_voice_command(transcript, steps):
     except Exception as exc:
         with state["lock"]: state["trial"] = f"voice error: {exc}"
         record_event(f"VOICE ERROR: {exc}")
+        speak(choose_response("nack"))
     finally:
         if uno is not None:
             try:
