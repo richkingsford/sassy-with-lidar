@@ -55,29 +55,29 @@ def parse_voice_command(transcript):
     if not text:
         raise ValueError("I did not hear a command")
 
-    if re.search(r"\b(flip a? 180|turn around|u turn)\b", text):
+    if re.fullmatch(r"(?:flip a? 180|turn around|u turn)", text):
         return [_step("TURN RIGHT 180 degrees", VOICE_POWER, 0, TURN_90_SECONDS * 2)]
 
     # Keep this before the generic forward pattern so the two-step command has
     # one unambiguous interpretation.
-    sequence = re.search(
-        r"\b(?:go )?forwards? for (.+?) seconds?(?: then)? (?:turn )?right (?:90|ninety)(?: degrees?)?\b",
+    sequence = re.fullmatch(
+        r"(?:go )?forwards? for (.+?) seconds?(?: then)? (?:turn )?right (?:90|ninety)(?: degrees?)?",
         text,
     )
     if sequence:
         seconds = _seconds(sequence.group(1))
         return [_step(f"FORWARD for {seconds:g} seconds", VOICE_POWER, VOICE_POWER, seconds), turn_right_90()]
 
-    if re.search(r"\b(?:turn )?right (?:90|ninety)(?: degrees?)?\b", text):
+    if re.fullmatch(r"(?:turn )?right (?:90|ninety)(?: degrees?)?", text):
         return [turn_right_90()]
-    if re.search(r"\b(?:turn )?left (?:90|ninety)(?: degrees?)?\b", text):
+    if re.fullmatch(r"(?:turn )?left (?:90|ninety)(?: degrees?)?", text):
         return [turn_left_90()]
 
-    forward = re.search(r"\b(?:go )?forwards? for (.+?) seconds?\b", text)
+    forward = re.fullmatch(r"(?:go )?forwards? for (.+?) seconds?", text)
     if forward:
         seconds = _seconds(forward.group(1))
         return [_step(f"FORWARD for {seconds:g} seconds", VOICE_POWER, VOICE_POWER, seconds)]
-    backward = re.search(r"\b(?:go )?(?:back|backward|backwards) for (.+?) seconds?\b", text)
+    backward = re.fullmatch(r"(?:go )?(?:back|backward|backwards) for (.+?) seconds?", text)
     if backward:
         seconds = _seconds(backward.group(1))
         return [_step(f"BACKWARD for {seconds:g} seconds", -VOICE_POWER, -VOICE_POWER, seconds)]

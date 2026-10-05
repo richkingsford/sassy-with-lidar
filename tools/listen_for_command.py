@@ -23,7 +23,11 @@ def main():
     record(output, args.seconds, "hw:0,0")
     transcript = transcribe_whisper(output, DEFAULT_WHISPER_CLI, DEFAULT_WHISPER_MODEL)
     print(f"TRANSCRIPT: {transcript or '[no speech recognized]'}")
-    plan = parse_voice_command(transcript)
+    try:
+        plan = parse_voice_command(transcript)
+    except ValueError as exc:
+        print(f"NO ACTION: {exc}")
+        return
     print("PLAN:")
     for step in plan:
         print(f"- {step['label']}  [D,{step['left']},{step['right']}] for {step['seconds']:.1f}s")
