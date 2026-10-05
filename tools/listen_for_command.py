@@ -9,7 +9,7 @@ from urllib import error, request
 from record_and_transcribe import (
     DEFAULT_WHISPER_CLI, DEFAULT_WHISPER_MODEL, record, transcribe_whisper,
 )
-from voice_commands import parse_voice_command
+from voice_commands import WAKE_PHRASE, command_after_wake_phrase, parse_voice_command
 from sassy_speech import choose_response, speak
 
 
@@ -28,8 +28,13 @@ def main():
     transcript_path.write_text(transcript + "\n", encoding="utf-8")
     print(f"FULL TRANSCRIPT: {transcript or '[no speech recognized]'}")
     print(f"Saved full transcript: {transcript_path}")
+    command_text = command_after_wake_phrase(transcript)
+    if command_text is None:
+        print(f"NO ACTION: wake phrase '{WAKE_PHRASE}' was not heard; staying silent and still")
+        return
+    print(f"WAKE-PHRASE COMMAND: {command_text}")
     try:
-        plan = parse_voice_command(transcript)
+        plan = parse_voice_command(command_text)
     except ValueError as exc:
         print(f"NO ACTION: {exc}")
         print(f"SASSY: {speak(choose_response('unknown'))}")
@@ -40,7 +45,7 @@ def main():
     if not args.execute:
         print("Preview only. Re-run with --execute after checking the plan.")
         return
-    payload = json.dumps({"transcript": transcript}).encode()
+    payload = json.dumps({"transcript": command_text}).encode()
     try:
         response = request.urlopen(request.Request(args.url, data=payload, headers={"Content-Type": "application/json"}), timeout=5)
         print(response.read().decode())

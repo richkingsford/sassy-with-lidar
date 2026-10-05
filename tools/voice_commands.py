@@ -5,6 +5,7 @@ import re
 MAX_DRIVE_SECONDS = 10.0
 TURN_90_SECONDS = 1.0  # Calibrate on the real floor before relying on geometry.
 VOICE_POWER = 178  # 70%, matching the proven one-wheel turn test.
+WAKE_PHRASE = "hey sassy"
 
 NUMBER_WORDS = {
     "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4,
@@ -17,6 +18,19 @@ NUMBER_WORDS = {
 
 def _normalise(text):
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9. ]", " ", text.lower())).strip()
+
+
+def command_after_wake_phrase(transcript):
+    """Return the first sentence after the last wake phrase, or None if asleep.
+
+    The caller retains the complete raw transcript for debugging.  Only this
+    short wake-phrase-qualified portion is eligible to move the robot.
+    """
+    pieces = re.split(r"\bhey\s+sassy\b", transcript, flags=re.IGNORECASE)
+    if len(pieces) < 2:
+        return None
+    candidate = re.split(r"[.!?]", pieces[-1], maxsplit=1)[0].strip(" ,;:-")
+    return candidate or None
 
 
 def _seconds(text):
