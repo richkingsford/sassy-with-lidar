@@ -2,6 +2,7 @@
 from pathlib import Path
 import os
 import random
+import re
 import subprocess
 import sys
 
@@ -25,16 +26,16 @@ def _responses():
         return FALLBACK
     for line in lines:
         lower = line.lower()
-        if "positive acks" in lower:
+        if lower.startswith("## acks"):
             current = "ack"
-        elif "positive" in lower and "nacks" in lower:
+        elif lower.startswith("## nacks"):
             current = "nack"
-        elif "no command detected" in lower:
+        elif lower.startswith("## “i don’t understand"):
             current = "unknown"
-        elif current and line.strip().startswith("“"):
-            phrase = line.strip().strip("“”").strip()
-            if phrase:
-                groups[current].append(phrase)
+        elif current:
+            match = re.search(r"“(.+?)”", line)
+            if match:
+                groups[current].append(match.group(1).strip())
     return {name: tuple(items) or FALLBACK[name] for name, items in groups.items()}
 
 
