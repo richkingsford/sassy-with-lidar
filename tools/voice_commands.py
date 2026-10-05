@@ -33,6 +33,15 @@ def command_after_wake_phrase(transcript):
     return candidate or None
 
 
+def contains_wake_phrase(transcript):
+    return re.search(r"\bhey\s+sassy\b", transcript, flags=re.IGNORECASE) is not None
+
+
+def first_sentence(transcript):
+    """Return the next spoken sentence for a wake phrase spanning two chunks."""
+    return re.split(r"[.!?]", transcript, maxsplit=1)[0].strip(" ,;:-") or None
+
+
 def _seconds(text):
     """Accept digits and basic spoken numbers, with a deliberately small cap."""
     value = text.strip()
