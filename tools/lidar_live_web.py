@@ -10,6 +10,7 @@ import imageio_ffmpeg
 import numpy as np
 from PIL import Image, ImageDraw
 import serial
+from voice_commands import parse_voice_command
 
 LIDAR_PORT = "/dev/ttyTHS1"; LIDAR_BAUD = 230400; UNO_PORT = "/dev/leia-uno"; UNO_BAUD = 115200; HTTP_PORT = 8080
 SIZE = 800; RANGE_M = 4.0; LIDAR_FORWARD_DEG = 90.0
@@ -116,6 +117,64 @@ def command_for_obstacles(scan,depth_mm, source_filter=None):
     if camera_hit:
         oak_note = f"; OAK {camera_hit[0]} {camera_hit[1] * 1000:.0f} mm"
     return command, f"{source.upper()}: wall {distance * 1000:.0f} mm at {offset:+.0f} deg -> {action}{oak_note}", source
+
+def run_voice_command(transcript, steps):
+    """Execute a parsed timed plan while the live LiDAR owns emergency safety."""
+    uno = None
+    with state["lock"]:
+        if state.get("active", False):
+            return
+        state["active"] = True
+        state["trial"] = "voice command: arming"
+    try:
+        uno = serial.Serial(UNO_PORT, UNO_BAUD, timeout=.1, write_timeout=.2)
+        uno.write(b"S\n"); uno.flush(); time.sleep(1.5)  # Uno reset after serial open.
+        with state["lock"]:
+            ready = bool(state["scans"])
+        if not ready:
+            raise RuntimeError("LiDAR is unavailable; refusing voice motion")
+        record_event(f"VOICE: {transcript}")
+        for step in steps:
+            command = f"D,{step['left']},{step['right']}"
+            deadline = time.monotonic() + step["seconds"]
+            record_event(f"VOICE -> {step['label']} [{command}]")
+            while time.monotonic() < deadline:
+                with state["lock"]:
+                    scan = list(state["scans"][-1]) if state["scans"] else []
+                    scan_age = time.monotonic() - state.get("scan_time", 0)
+                if scan_age > .5:
+                    raise RuntimeError(f"LiDAR stale ({scan_age:.2f}s); stopping")
+                red_hit = red_zone_obstacle(scan)
+                if red_hit is not None:
+                    angle, distance, _ = red_hit
+                    message = f"VOICE RED ZONE: {distance*1000:.0f} mm at {angle_error(angle,LIDAR_FORWARD_DEG):+.0f} deg"
+                    record_event(message + " -> STOP, BACK UP, ABORT")
+                    uno.write(b"S\n"); uno.flush()
+                    with state["lock"]: state["trial"] = message + " -> stopping"
+                    time.sleep(RED_ZONE_STOP_S)
+                    retreat_deadline = time.monotonic() + RED_ZONE_BACKUP_S
+                    retreat = f"D,-{BACKUP_SPEED},-{BACKUP_SPEED}\n".encode()
+                    while time.monotonic() < retreat_deadline:
+                        uno.write(retreat); uno.flush(); time.sleep(.08)
+                    uno.write(b"S\n"); uno.flush()
+                    with state["lock"]: state["trial"] = "voice command aborted: red-zone retreat complete"
+                    return
+                uno.write((command + "\n").encode()); uno.flush()
+                with state["lock"]: state["trial"] = f"VOICE: {step['label']} [{command}]"
+                time.sleep(.08)
+        uno.write(b"S\n"); uno.flush()
+        with state["lock"]: state["trial"] = "voice command complete: stop sent"
+        record_event("VOICE STOP")
+    except Exception as exc:
+        with state["lock"]: state["trial"] = f"voice error: {exc}"
+        record_event(f"VOICE ERROR: {exc}")
+    finally:
+        if uno is not None:
+            try:
+                uno.write(b"S\n"); uno.flush()
+            finally:
+                uno.close()
+        with state["lock"]: state["active"] = False
 
 def run_trial():
     """Use the dashboard's already-live sensor frames for one guarded motion test."""
@@ -470,6 +529,26 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200); self.send_header("Content-Type","application/json"); self.send_header("Content-Length",str(len(body))); self.end_headers(); self.wfile.write(body); return
         self.send_error(404)
     def do_POST(self):
+        if self.path == "/voice":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                payload = json.loads(self.rfile.read(length))
+                transcript = str(payload["transcript"])
+                steps = parse_voice_command(transcript)
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                body = f"voice command rejected: {exc}".encode()
+                self.send_response(400); self.send_header("Content-Type", "text/plain"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+                return
+            with state["lock"]:
+                active = state.get("active", False)
+            if active:
+                body = b"controller already active"
+                self.send_response(409); self.send_header("Content-Type", "text/plain"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+                return
+            threading.Thread(target=run_voice_command, args=(transcript, steps), daemon=True).start()
+            body = ("voice plan started: " + ", then ".join(step["label"] for step in steps)).encode()
+            self.send_response(202); self.send_header("Content-Type", "text/plain"); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+            return
         if self.path != "/trial": self.send_error(404); return
         with state["lock"]:
             active=state.get("active",False)
