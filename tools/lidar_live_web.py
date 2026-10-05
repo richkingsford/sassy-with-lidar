@@ -16,9 +16,14 @@ SIZE = 800; RANGE_M = 4.0; LIDAR_FORWARD_DEG = 90.0
 # Steering is reserved for a nearby wall in front of the robot.  The previous
 # 1.56 m / +/-75 deg envelope treated distant room walls as active hazards.
 OBSTRUCTION_DEPTH_M = 1.50; OBSTRUCTION_WIDTH_M = 1.217; CAMERA_FPS = 15
-MIN_VALID_DISTANCE_M = .30; TRIAL_S = 5.0; FORWARD_SPEED = 255
-FORWARD_ARC_DEG = 55.0; CLEARANCE_S = .5
-TRIAL_VIDEO = Path("artifacts/navigation_trial_5s_right_turn_fix.mp4")
+MIN_VALID_DISTANCE_M = .30; TRIAL_S = 30.0; FORWARD_SPEED = 255
+FORWARD_ARC_DEG = 55.0; CLEARANCE_S = .425
+TURN_SWITCH_DEG = 20.0
+# The red zone is deliberately nested inside the normal obstruction zone.  A
+# cluster here is an emergency: stop first, then create room to manoeuvre.
+RED_ZONE_DEPTH_M = .65; RED_ZONE_WIDTH_M = .75
+RED_ZONE_STOP_S = .12; RED_ZONE_BACKUP_S = 1.5; BACKUP_SPEED = 180
+TRIAL_VIDEO = Path("artifacts/navigation_trial_30s_ne_switch_fix.mp4")
 state = {"scans": deque(maxlen=3), "rgb": None, "depth": None, "depth_mm": None, "trial": "ready", "events": deque(maxlen=24), "lock": threading.Lock()}
 
 def record_event(message):
@@ -33,6 +38,17 @@ def angle_error(angle, reference): return (angle-reference+180.0) % 360.0 - 180.
 def pivot_command(turn_right):
     """Physical trial: slot 1 forward pivots right; slot 2 pivots left."""
     return f"D,{FORWARD_SPEED},0" if turn_right else f"D,0,{FORWARD_SPEED}"
+
+def should_switch_turn(latched_turn, new_command, scan):
+    """Switch only when a fresh LiDAR obstacle is clearly across center."""
+    if new_command is None or new_command == latched_turn:
+        return False
+    hit = lidar_obstacle(scan)
+    if hit is None:
+        return False
+    offset = angle_error(hit[0], LIDAR_FORWARD_DEG)
+    return (latched_turn == pivot_command(True) and offset >= TURN_SWITCH_DEG or
+            latched_turn == pivot_command(False) and offset <= -TURN_SWITCH_DEG)
 
 def lidar_clusters(scan):
     ordered=sorted((a,d) for a,d in scan if MIN_VALID_DISTANCE_M <= d <= OBSTRUCTION_DEPTH_M)
@@ -49,6 +65,19 @@ def lidar_obstacle(scan):
         offset=angle_error(angle,LIDAR_FORWARD_DEG)
         # Cover the full forward safety arc, including forward-left/right walls.
         if abs(offset) <= FORWARD_ARC_DEG: candidates.append((angle,distance,count))
+    return min(candidates,key=lambda item:item[1]) if candidates else None
+
+def is_in_forward_rectangle(angle, distance, depth_m, width_m):
+    """Whether a polar LiDAR point lies in a robot-forward safety rectangle."""
+    relative=math.radians(angle_error(angle,LIDAR_FORWARD_DEG))
+    forward=distance*math.cos(relative)
+    lateral=distance*math.sin(relative)
+    return 0 <= forward <= depth_m and abs(lateral) <= width_m/2
+
+def red_zone_obstacle(scan):
+    """Return the nearest reliable LiDAR cluster inside the emergency zone."""
+    candidates=[cluster for cluster in lidar_clusters(scan)
+                if is_in_forward_rectangle(cluster[0],cluster[1],RED_ZONE_DEPTH_M,RED_ZONE_WIDTH_M)]
     return min(candidates,key=lambda item:item[1]) if candidates else None
 
 def camera_obstacle(depth_mm):
@@ -110,6 +139,7 @@ def run_trial():
             if not ready: raise RuntimeError("LiDAR or OAK depth is unavailable")
             with state["lock"]: state["trial"]="running"
             started=time.monotonic(); latched_turn=None; latched_source=None; latched_description=None; clear_started=None; last_logged=None; last_log_time=0.0
+            red_zone_latched=False; emergency_started=None
             video = start_trial_video()
             def record_frames():
                 while not recording_stop.is_set():
@@ -128,27 +158,57 @@ def run_trial():
                     scan_age=time.monotonic()-state.get("scan_time",0)
                 if scan_age > .5:
                     raise RuntimeError(f"LiDAR stale ({scan_age:.2f}s); stopping")
-                command,description,source = command_for_obstacles(scan,depth,latched_source)
-                if command is not None:
-                    # Choose an escape direction once, then retain it until the
-                    # sensor that found the wall reports a genuine clearance.
-                    if latched_turn is None:
-                        latched_turn=command; latched_source=source; latched_description=description
-                    command=latched_turn
-                    action="TURN RIGHT" if command == pivot_command(True) else "TURN LEFT"
-                    description=description.split(" -> ")[0] + " -> " + action
-                    clear_started=None
-                elif latched_turn is not None:
-                    if clear_started is None:
-                        clear_started=time.monotonic()
-                    if time.monotonic()-clear_started < CLEARANCE_S:
+                red_hit=red_zone_obstacle(scan)
+                now=time.monotonic()
+                if emergency_started is not None:
+                    elapsed=now-emergency_started
+                    if elapsed < RED_ZONE_STOP_S:
+                        command="S"
+                        description="RED ZONE -> STOP immediately"
+                    elif elapsed < RED_ZONE_STOP_S+RED_ZONE_BACKUP_S:
+                        remaining=RED_ZONE_STOP_S+RED_ZONE_BACKUP_S-elapsed
+                        command=f"D,-{BACKUP_SPEED},-{BACKUP_SPEED}"
+                        description=f"RED ZONE -> BACK UP for {remaining:.1f}s more"
+                    else:
+                        # Do not resume motion until the emergency zone is clear.
+                        emergency_started=None
+                        command="S"
+                        description="RED ZONE -> backup complete; waiting for clear"
+                elif red_hit is not None and not red_zone_latched:
+                    red_zone_latched=True; emergency_started=now
+                    latched_turn=None; latched_source=None; latched_description=None; clear_started=None
+                    angle,distance,_=red_hit
+                    command="S"
+                    description=f"RED ZONE: wall {distance*1000:.0f} mm at {angle_error(angle,LIDAR_FORWARD_DEG):+.0f} deg -> STOP immediately"
+                    record_event(description)
+                elif red_hit is not None:
+                    command="S"
+                    description="RED ZONE -> waiting for clear"
+                else:
+                    red_zone_latched=False
+                    command,description,source = command_for_obstacles(scan,depth,latched_source)
+                    if command is not None:
+                        # Choose an escape direction once, then retain it until the
+                        # sensor reports clearance or a wall clearly crosses center.
+                        if latched_turn is None or should_switch_turn(latched_turn,command,scan):
+                            if latched_turn is not None:
+                                record_event(f"WALL CROSSED CENTER -> switching to {command}")
+                            latched_turn=command; latched_source=source; latched_description=description
                         command=latched_turn
                         action="TURN RIGHT" if command == pivot_command(True) else "TURN LEFT"
-                        description=f"CLEAR -> hold {action} for {CLEARANCE_S:.1f}s"
+                        description=description.split(" -> ")[0] + " -> " + action
+                        clear_started=None
+                    elif latched_turn is not None:
+                        if clear_started is None:
+                            clear_started=time.monotonic()
+                        if time.monotonic()-clear_started < CLEARANCE_S:
+                            command=latched_turn
+                            action="TURN RIGHT" if command == pivot_command(True) else "TURN LEFT"
+                            description=f"CLEAR -> hold {action} for {CLEARANCE_S:.3f}s"
+                        else:
+                            latched_turn=None; latched_source=None; latched_description=None; command=f"D,{FORWARD_SPEED},{FORWARD_SPEED}"; description="CLEAR -> FORWARD"
                     else:
-                        latched_turn=None; latched_source=None; latched_description=None; command=f"D,{FORWARD_SPEED},{FORWARD_SPEED}"; description="CLEAR -> FORWARD"
-                else:
-                    command=f"D,{FORWARD_SPEED},{FORWARD_SPEED}"
+                        command=f"D,{FORWARD_SPEED},{FORWARD_SPEED}"
                 now=time.monotonic(); max_gap=max(max_gap,now-last_sent); last_sent=now
                 uno.write((command+"\n").encode()); uno.flush()
                 description += f" [sent {command}]"
@@ -261,7 +321,11 @@ def make_lidar_image():
         radius=meters*scale; draw.ellipse((c-radius,c-radius,c+radius,c+radius), outline="#2e4352"); draw.text((c+5,c-radius+4),f"{meters} m",fill="#87a1b1")
     draw.line((c-15,c,c+15,c),fill="white",width=2); draw.line((c,c-15,c,c+15),fill="white",width=2)
     half=(OBSTRUCTION_WIDTH_M/2)*scale; top=c-OBSTRUCTION_DEPTH_M*scale
-    draw.rectangle((c-half,top,c+half,c),outline="#ff4b4b",width=3); draw.text((c+half+6,top+4),"obstruction zone",fill="#ff7676")
+    red_half=(RED_ZONE_WIDTH_M/2)*scale; red_top=c-RED_ZONE_DEPTH_M*scale
+    # Amber is the normal turn-away envelope; red is the closer emergency zone.
+    draw.rectangle((c-half,top,c+half,c),outline="#f4c95d",width=3); draw.text((c+half+6,top+4),"obstruction zone",fill="#f4c95d")
+    draw.rectangle((c-red_half,red_top,c+red_half,c),outline="#ff4b4b",width=4)
+    draw.text((c+red_half+6,red_top+4),"RED ZONE: stop + back up",fill="#ff4b4b")
     draw.text((15,15),"Sassy / WitMotion D6 live lidar",fill="white"); draw.text((15,40),"Top = robot forward; centre = lidar",fill="#b6cbd8")
     xy=[]
     for angle,distance in points:
@@ -269,8 +333,9 @@ def make_lidar_image():
     for first,second in zip(xy,xy[1:]):
         if abs(first[2]-second[2]) < .12: draw.line((first[0],first[1],second[0],second[1]),fill="#48d7bd",width=3)
     for x,y,distance in xy:
-        blocked=c-half <= x <= c+half and top <= y <= c
-        color="#ff4b4b" if blocked else ("#52616b" if distance < .30 else "#f4c95d")
+        in_obstruction=c-half <= x <= c+half and top <= y <= c
+        in_red=c-red_half <= x <= c+red_half and red_top <= y <= c
+        color="#ff4b4b" if in_red else ("#f4c95d" if in_obstruction else ("#52616b" if distance < .30 else "#48d7bd"))
         draw.ellipse((x-3,y-3,x+3,y+3),fill=color)
     out=io.BytesIO(); image.save(out,format="JPEG",quality=88); return out.getvalue()
 
@@ -353,13 +418,23 @@ class Handler(BaseHTTPRequestHandler):
             if not ready:
                 self.send_error(503, "Waiting for fresh LiDAR, RGB, and depth frames")
                 return
-            command, measurement, _=command_for_obstacles(scan,depth)
-            if command is None:
-                label=f"WOULD FORWARD [D,{FORWARD_SPEED},{FORWARD_SPEED}]"
+            red_hit=red_zone_obstacle(scan)
+            if red_hit is not None:
+                angle,distance,_=red_hit
+                measurement=(f"RED ZONE: wall {distance*1000:.0f} mm at "
+                             f"{angle_error(angle,LIDAR_FORWARD_DEG):+.0f} deg")
+                label=(f"WOULD STOP, THEN BACK UP {RED_ZONE_BACKUP_S:.1f}s "
+                       f"[D,-{BACKUP_SPEED},-{BACKUP_SPEED}]")
             else:
-                action="TURN RIGHT" if command == pivot_command(True) else "TURN LEFT"
-                label=f"WOULD {action} [{command}]"
-            canvas=make_trial_frame(label,[measurement,"Preview only; motors were not commanded"])
+                command, measurement, _=command_for_obstacles(scan,depth)
+                if command is None:
+                    label=f"WOULD FORWARD [D,{FORWARD_SPEED},{FORWARD_SPEED}]"
+                else:
+                    action="TURN RIGHT" if command == pivot_command(True) else "TURN LEFT"
+                    label=f"WOULD {action} [{command}]"
+            canvas=make_trial_frame(label,[measurement,
+                f"Normal turn-clearance buffer: {CLEARANCE_S*1000:.0f} ms",
+                "Preview only; motors were not commanded"])
             output=io.BytesIO(); canvas.save(output,format="PNG")
             body=output.getvalue()
             self.send_response(200); self.send_header("Content-Type","image/png")
@@ -370,7 +445,9 @@ class Handler(BaseHTTPRequestHandler):
         downloads = {
             "/artifacts/fused_wall_capture_10s.mp4": (Path("artifacts/fused_wall_capture_10s.mp4"), "video/mp4"),
             "/artifacts/fused_wall_capture_10s.csv": (Path("artifacts/fused_wall_capture_10s.csv"), "text/csv"),
-            "/artifacts/navigation_trial_5s_right_turn_fix.mp4": (TRIAL_VIDEO, "video/mp4"),
+            "/artifacts/navigation_trial_5s_right_turn_fix.mp4": (Path("artifacts/navigation_trial_5s_right_turn_fix.mp4"), "video/mp4"),
+            "/artifacts/navigation_trial_30s_ne_check.mp4": (Path("artifacts/navigation_trial_30s_ne_check.mp4"), "video/mp4"),
+            "/artifacts/navigation_trial_30s_ne_switch_fix.mp4": (TRIAL_VIDEO, "video/mp4"),
             "/artifacts/navigation_snapshot.png": (Path("artifacts/navigation_snapshot.png"), "image/png"),
         }
         if self.path in downloads:
@@ -380,7 +457,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200); self.send_header("Content-Type", content_type); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body); return
         if self.path=="/":
             body=b'''<!doctype html><title>Sassy sensors</title><style>body{background:#101820;color:#ddd;font:16px sans-serif;margin:20px}h1{text-align:center}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:16px;max-width:1800px;margin:auto}.panel{background:#17242d;padding:10px;border-radius:8px}h2{font-size:18px;margin:0 0 8px}img{width:100%;display:block}button{font-size:16px;padding:10px 16px}#status{margin:12px;text-align:center}#events{white-space:pre-wrap;min-height:110px;max-height:230px;overflow:auto;color:#b9d8e7;font:14px ui-monospace,monospace}</style><h1>Sassy live sensors</h1><p id="status">controller: loading</p><p style="text-align:center"><button onclick="fetch('/trial',{method:'POST'}).then(r=>r.text()).then(t=>status.textContent=t)">Run guarded 20-second test (85% power)</button></p><section class="panel" style="max-width:1100px;margin:0 auto 16px"><h2>Wall position and robot response</h2><div id="events">No trial events yet.</div></section><script>const status=document.querySelector('#status'),events=document.querySelector('#events');setInterval(()=>{fetch('/status').then(r=>r.text()).then(t=>status.textContent='controller: '+t);fetch('/events').then(r=>r.json()).then(x=>events.textContent=x.join('\\n')||'No trial events yet.')},500)</script><div class="grid"><section class="panel"><h2>WitMotion D6 LiDAR</h2><img src="/lidar.mjpg"></section><section class="panel"><h2>OAK-D Lite RGB</h2><img src="/camera.mjpg"></section><section class="panel"><h2>OAK-D Lite depth</h2><img src="/depth.mjpg"></section></div>'''
-            body=body.replace(b"20-second test (85% power)", b"5-second test (100% power)")
+            body=body.replace(b"20-second test (85% power)", b"30-second test (100% power)")
             self.send_response(200); self.send_header("Content-Type","text/html"); self.send_header("Content-Length",str(len(body))); self.end_headers(); self.wfile.write(body); return
         if self.path in ("/lidar.mjpg","/stream.mjpg"): stream(self,make_lidar_image); return
         if self.path=="/camera.mjpg": stream(self,lambda: state["rgb"] or placeholder("Waiting for OAK-D Lite RGB...")); return
